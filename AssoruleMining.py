@@ -1,528 +1,645 @@
 '''
 Available methods are the followings:
-[1] create_schedule
-[2] gantt_plot
-[3] workingdays
-[4] get_workload
+[1] AssoRuleMining
+[2] evaluate_rules
 
 Authors: Danusorn Sitdhirasdr <danusorn.si@gmail.com>
-versionadded:: 21-04-2022
+versionadded:: 30-05-2022
 
 '''
-import pandas as pd, numpy as np, sys
-from pandas import Timestamp
-from matplotlib.patches import Patch
-import matplotlib.pyplot as plt
-import matplotlib as mpl
-from matplotlib.ticker import(FixedLocator, 
-                              FixedFormatter, 
-                              StrMethodFormatter,
-                              FuncFormatter)
-from matplotlib.patches import Patch
-from datetime import date
+import pandas as pd, numpy as np, time, os
+import collections
+from IPython.display import display
+import ipywidgets as widgets
+import inspect
+from itertools import combinations
 
-# Adding fonts
-from matplotlib import font_manager
-paths = font_manager.findSystemFonts(fontpaths=None, fontext='ttf')
-for font_path in paths:
-    if font_path.find("Hiragino Sans GB W3")>-1: 
-        try:
-            font_manager.fontManager.addfont(font_path)
-            prop = font_manager.FontProperties(fname=font_path)
-            plt.rcParams['font.family'] = 'sans-serif'
-            plt.rcParams['font.sans-serif'] = prop.get_name()
-            plt.rcParams.update({'font.family':'sans-serif'})
-            plt.rcParams.update({'font.sans-serif':prop.get_name()})
-            plt.rc('axes', unicode_minus=False)
-            break
-        except:pass
+__all__  = ["AssoRuleMining",
+            "evaluate_rules"]
 
-__all__ = ["create_schedule", "gantt_plot", 
-           "workingdays", "get_workload"]
-
-def create_schedule(schedule, ref_date=None, holidays=None):
+def AssoRule_base(X, y, start_with=None, metric="entropy", operator="or",
+                  min_lift=1, class_weights=None):
     
     '''
-    Create schedule DataFrame.
+    Using the similar principle as "Association rule", but instead of 
+    measuring on "confidence" or "support", it focuses on class 
+    attribute i.e. "1" and finds the best RHS (a consequent rule) that
+    maximizes selected metric e.g. precision, or decile-lift given LHS
+    (antecedent rules).
     
     Parameters
     ----------
-    schedule : pd.DataFrame object
-        A DataFrame with the following columns:
+    X : pd.DataFrame, shape of (n_samples , n_features)
+        Binary variables
         
-        Column      Dtype           Description         
-        ------      -----           -----------    
-        task        object          Task name
-        start       datetime64[ns]  Starting date
-        end         datetime64[ns]  Ending date
-        completion  float64         Percent completion (actual)
+    y : array-like of shape (n_samples,)
+        Target values (binary)
+        
+    start_with : list of str, optional, default: None
+        List of starting features. If None, the first variable that 
+        has the highest score from specified `metric` will be 
+        seleceted.
     
-    ref_date : str, default=None
-        The reference date to be benchmarked against all tasks. If 
-        None, it defaults to today's date.
+    operator : {"or", "and"}, default="or"
+        If "or", "or" operator is assigned as a relationship between 
+        antecedent and consequent rules (n_operands > 0). If "and", 
+        "and" operator is assigned (n_operands > 1).
         
-    holidays : array of datetime64[D], default=None
-        An array of dates to consider as invalid dates. They may be 
-        specified in any order, and NaT (not-a-time) dates are ignored.
-        
-    Returns
-    -------
-    X : pd.DataFrame object
-        A DataFrame with the following columns:
-   
-        Column      Dtype           Description
-        ------      -----           -----------
-        task        object          Task name
-        start       datetime64[ns]  Starting date
-        end         datetime64[ns]  Ending date
-        completion  float64         Percent completion (actual)
-        start_num   int64           Starting index
-        end_num     int64           Ending index
-        duration    int64           Duration in day(s)
-        busday      int64           Number of business days
-        prog_day    float64         Actual progress in day(s)
-        exp_day     int64           Expected progress in day(s)
-        plan        float64         Percent completion (expected)
-        diff_pct    float64         Difference in percent completion
-        diff_day    float64         Difference in days
-        status      object          Task status
+    metric : str, default="entropy"
+        The function to evaluate the quality of rule (RHS). Supported 
+        criteria are "lift" for the decile lift, "recall" for the 
+        recall, "precision" for the precision, "f1" for the balanced 
+        F-score, and "entropy" for the information gain. 
+       
+    min_lift : float, default=1
+        The minimum per-decile lift required to continue. This is 
+        relevant when metric is "lift".
     
-    '''
-    # ===============================================================
-    X = pd.DataFrame(schedule).copy()
-    # Default of ref_date is today().
-    if ref_date is None: ref_date = Timestamp(date.today())
-    ref_date = Timestamp(ref_date)
-    # ---------------------------------------------------------------
-    # Starting and ending dates
-    start_date = X["start"].min()
-    end_date = X["end"].max()
-    # ---------------------------------------------------------------
-    # Number of days from project start to start of tasks
-    X['start_num'] = (X["start"] - start_date).dt.days
-    # Number of days from project start to end of tasks
-    X['end_num'] = (X["end"] - start_date).dt.days
-    # Number of days between start and end of each task
-    X['duration'] = X["end_num"] - X["start_num"]
-    # Number of business days
-    X['busday'] = [len(workingdays(X["start"][n], 
-                                   X["end"][n], holidays)) 
-                   for n in range(len(X))]
-    # ---------------------------------------------------------------
-    # Working days between start and current progression of each task
-    X['prog_day'] = (X["duration"] * X["completion"])
-    exp_day = np.fmin(np.fmax((ref_date-X["start"]).dt.days,0),
-                      X["duration"])
-    X["exp_day"] = exp_day
-    X["plan"] = exp_day/np.fmax(X["duration"],1)
-    # ---------------------------------------------------------------
-    # Difference between actual and plan
-    # (-) : behind schedule
-    # (+) : on-time or ahead of schedule
-    X["diff_pct"] = X["completion"] - X['plan'] # <-- % diff
-    X["diff_day"] = X["prog_day"] - X["exp_day"] # <-- day diff
-    # ---------------------------------------------------------------
-    # Task status
-    status = np.where(X["plan"] > X["completion"], "delay", 
-                      np.where(X["completion"]==1,
-                               "complete","on-time"))
-    X["status"] = np.where(X["duration"]==0,"event",status)
-    # ===============================================================
-
-    return X.copy()
-
-def split_char(string, length, n_lines=2, suffix=" ..."):
-    
-    '''Private Function: split string of words into lines'''
-    lines = []
-    split2w = np.r_[string.lstrip().rstrip().split(" ")]
-    while len(split2w)>0:
-        index = np.r_[[len(word) for word in split2w]]
-        index = np.cumsum(index)<=length
-        lines += [" ".join(split2w[index])]
-        split2w = split2w[~index]
-        if len(lines)==n_lines: 
-            if len(split2w)>0: lines[-1] += suffix
-            break
-    return lines
-
-def gantt_plot(schedule, ax=None, ref_date=None ,colors=None, 
-               major_locator=3, minor_locator=1, char_length=20, 
-               tight_layout=True, holidays=None, show_delta=False, 
-               show_vline=True, show_hline=True, show_days=True, 
-               start_date=None, end_date=None):
-    
-    '''
-    Gantt Chart
-    
-    Parameters
-    ----------
-    schedule : pd.DataFrame object
-        An output from `create_schedule` function.
-    
-    ax : Matplotlib axis object, default=None
-        Predefined Matplotlib axis. If None, it uses default size.
-        
-    ref_date : str, default=None
-        The reference date to be benchmarked against all tasks. If
-        None, it defaults to today's date.
-        
-    colors : array-like of shape (n_labels,), default=None
-        List of color-hex must be arranged in correspond to following 
-        labels i.e. ["complete", "on-time", "delay", "event", 
-        "holidays"]. If None, it uses default colors from Matplotlib.
-        
-    major_locator : int, default=3
-        A number of date intervals (major ticks) to be displayed on 
-        x-axis. 
-        
-    minor_locator : int, default=1
-        A number of intervals with minor ticks on x-axis.
-        
-    char_length : int, default=20
-        A length of characters (task) to be displayed with in 2 lines.
-
-    tight_layout : bool, default=True
-        If True, it adjusts the padding between and around subplots i.e. 
-        plt.tight_layout().
-        
-    holidays : list of str or array of datetime64[D], default=None
-        A list of public or special holiday dates in `str` format i.e.
-        ["2022-01-01"].
-        
-    show_delta : boolean, default=None
-        If True, it displays differences between acutal and expected
-        progress of tasks, whose status is either "delay" or "on-time".
-        
-    show_vline : bool, default=True
-        If True, it displays minor gridlines on x-axis.
-    
-    show_hline : bool, default=True
-        If True, it display minor gridlines on y-axis.
-    
-    show_days : bool, default=True
-        If True, it displays a number of business days and duration
-        underneath percent completion e.g. (8/10).
+    class_weights : "balanced" or dict, default=None
+        Weights associated with classes in the form {class_label: 
+        weight}. If not given, all classes are supposed to have weight 
+        one. The "balanced" mode uses the values of y to automatically 
+        adjust weights inversely proportional to class frequencies in 
+        the input data as n_samples / (n_classes * np.bincount(y)).
+        This is relevant when metric is "entropy".
     
     Returns
     -------
-    ax : Matplotlib axis object
-    
-    '''
-    # Initialize default parameters
-    # ===============================================================
-    X = schedule.reset_index(drop=True).copy()
-    n_tasks = len(X)
-    # ---------------------------------------------------------------
-    # Convert to datetime64
-    X[["start","end"]] = X[["start", "end"]].apply(pd.to_datetime)
-    min_date, max_date = X["start"].min(), X["end"].max()
-    # ---------------------------------------------------------------
-    # Starting date
-    if start_date is None: start_date = X["start"].min()
-    start_date = max(Timestamp(start_date), min_date)
-    # --------------------------------------------------------------
-    # Ending date
-    if end_date is None: end_date = X["end"].max()
-    end_date = min(Timestamp(end_date), max_date)
-    # --------------------------------------------------------------
-    # Validate: end_date > start_date
-    if end_date <= start_date:
-        raise ValueError(f"`end_date` must be greater than" 
-                         f"`start_date`. Got `end_date` "
-                         f"({end_date.date()}) <= `start_date " 
-                         f"({start_date.date()}).")
-    # --------------------------------------------------------------
-    # Number of periods and date range.
-    dates = pd.date_range(min_date, max_date+np.timedelta64(1,'D'))
-    # Determine x_min, and x_max
-    indices = np.isin(dates, [start_date, end_date])
-    x_min, x_max = np.arange(len(dates))[indices]
-    # ---------------------------------------------------------------
-    # Default axis
-    if ax is None:
-        height = max(n_tasks*0.45, 4.5)
-        width  = max((x_max - x_min + 2)*0.3 + 1, 12)
-        ax = plt.subplots(figsize=(width, height))[1]
-    # ---------------------------------------------------------------
-    # Default of ref_date is today().
-    if ref_date is None: ref_date = Timestamp(date.today())
-    ref_date = Timestamp(ref_date)
-    if colors is None:
-        colors = ["#3498db","#2ecc71","#e74c3c","#2C3A47","#25CCF7"]
-    major_locator = max(1, major_locator)
-    minor_locator = max(1, minor_locator)
-    # ---------------------------------------------------------------
-    if holidays is not None:
-        # Convert string date to datetime64.
-        holidays = pd.Series([Timestamp(t) for t in holidays])
-    else: holidays = np.array(holidays, dtype="datetime64[D]")
-    # ===============================================================
-
-    # Gantt chart
-    # ===============================================================
-    y, patches, labels, = np.arange(n_tasks), [], []
-    status = ["complete", "on-time", "delay", "event"]
-    for i,s in enumerate(status):
-        index = X["status"]==s
-        if (sum(index)>0) & (s!="event"):
-            # Expected number of days.
-            args = (y[index], X["exp_day"][index])
-            kwds = dict(left=X["start_num"][index], height=0.7, 
-                        color=colors[i], zorder=1, alpha=0.4)
-            ax.barh(*args, **kwds)
-            # Actual progress
-            args = (y[index], X["prog_day"][index])
-            kwds = dict(left=X["start_num"][index], height=0.7, 
-                        color=colors[i], zorder=2)
-            ax.barh(*args, **kwds)
-        elif  (sum(index)>0) & (s=="event"):
-            kwds = dict(c=colors[i], zorder=2, marker="D", s=50)
-            ax.scatter(X["start_num"][index], y[index], **kwds)
-    # ---------------------------------------------------------------          
-        labels += [s[0].upper() + s[1:] + 
-                   " ({:,d})".format(sum(index))]
-        if s=="event": 
-            legend_kwds = dict(marker="D", markersize=5, 
-                               markerfacecolor=colors[-2], 
-                               markeredgecolor="none",
-                               color='none') 
-            patches += [mpl.lines.Line2D([0],[0], **legend_kwds)]
-        else: patches += [Patch(facecolor=colors[i])]
-    # ---------------------------------------------------------------
-    # Facecolor
-    index = X["status"]!="event"
-    ax.barh(y[index], X["duration"][index], left=X["start_num"][index], 
-            alpha=0.5, facecolor="grey", height=0.7, edgecolor="none",
-            zorder=1)
-    # ---------------------------------------------------------------
-    kwds = dict(facecolor="none", height=0.7, zorder=3, lw=1)
-    delay = [(X["status"]!="delay") & (X["status"]!="event"),
-             (X["status"]=="delay")]
-    for index,ec in zip(delay, ["#636e72","#e74c3c"]):
-        if sum(index)>0:
-            args = (y[index], X["duration"][index])
-            kwds.update({"left":X["start_num"][index],"edgecolor":ec})
-            ax.barh(*args, **kwds)
-    # ===============================================================
-
-    # Task, and % progress
-    # ===============================================================
-    kwds = dict(textcoords='offset points', va="center", fontsize=10.5, 
-                color="k", bbox=dict(boxstyle='round', facecolor="w", 
-                                     pad=0.1, edgecolor="none"))
-    r_text = {**kwds, **dict(ha="left" , xytext=(+3,0))}
-    l_text = {**kwds, **dict(ha="right", xytext=(-3,0))}
-    # ---------------------------------------------------------------            
-    for n in range(n_tasks):
-        if X["status"][n]!="event":
-            s = "{:.0%}".format( X["completion"][n])
-            if (X["status"][n]!="complete") & show_delta:
-                diff = X["diff_pct"][n]
-                if diff!=0:s += " ({:+,.0%})".format(diff)
-            if show_days:
-                a = (X["busday"][n], X["duration"][n])
-                s = "\n".join((s,"({:,d}/{:,d})".format(*a))) 
-            ax.annotate(s,(X["end_num"][n],n), **r_text)
-            s = "\n".join(split_char(X["task"][n], char_length))
-            i = min(max(X["start_num"][n], x_min), x_max)
-            ax.annotate(s, (i,n),**l_text)
-        else: 
-            s = split_char(X["task"][n], char_length)
-            i = min(max(X["start_num"][n], x_min), x_max)
-            ax.annotate("\n".join(s), (i,n),
-                        **{**l_text,**dict(xytext=(-10,0))})
-    # ===============================================================    
-
-    # Set other attributes
-    # ===============================================================
-    ax.set_yticks(y)
-    ax.set_yticklabels([])
-    ax.spines["left"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["top"].set_visible(False)
-    ax.tick_params(axis='y', length=0)
-    ax.tick_params(axis='both', labelsize=12)
-    ax.set_ylim(-0.5,max(y)+0.5)
-    # ---------------------------------------------------------------
-    # X-ticks
-    xticks = np.arange(0, len(dates), major_locator)
-    xticks_minor = np.arange(0, len(dates), minor_locator)
-    # ---------------------------------------------------------------
-    ax.set_xticks(xticks)
-    ax.set_xticks(xticks_minor, minor=True)
-    ax.set_xticklabels(dates.strftime("%d/%m")[::major_locator], 
-                       color='k')
-    # ax.set_xlim(-1, max(xticks_minor)+1)
-    ax.set_xlim(x_min, x_max)
-    # ===============================================================
-
-    # Vertival spans & reference date
-    # ===============================================================
-    # Weekends
-    xticks = np.arange(0, len(dates), 1)
-    for n in xticks[dates.dayofweek>=5]:
-        ax.axvspan(n, n+1, zorder=-1, facecolor="grey", 
-                   edgecolor="none", alpha=0.1)
-    # ---------------------------------------------------------------
-    # Holidays
-    ref_x = xticks[np.isin(dates, holidays)]
-    if len(ref_x)>0:
-        for n in ref_x:
-            ax.axvspan(n, n+1, zorder=-1, alpha=0.2, 
-                       facecolor=colors[4], edgecolor="none")
-    labels += ["Weekends", 'Holidays']
-    patches += [Patch(facecolor='grey', alpha=0.1),
-                Patch(facecolor=colors[4], alpha=0.2)]
-    # ---------------------------------------------------------------
-    # Reference date.
-    kwds = dict(textcoords='offset points', va="bottom", ha="center", 
-                fontsize=13, xytext=(0,3), color="k", fontweight=600)
-    ref_x = xticks[np.isin(dates, ref_date)]
-    if len(ref_x)>0:
-        line = ax.axvline(ref_x, zorder=-1, lw=1, c="grey", ls="--")
-        ax.annotate(Timestamp(ref_date).strftime("%d/%m")
-                    ,(ref_x, n_tasks-0.5), **kwds)
-        labels += ["Reference date"]
-        patches += [line]
-    # ---------------------------------------------------------------
-    # Show vertical lines
-    if show_vline:
-        for n in np.arange(*ax.get_xlim(), minor_locator):
-            ax.axvline(n, color="#bbbbbb", linestyle="--", lw=0.5, 
-                       zorder=-1)
-    # ---------------------------------------------------------------
-    # Show horizontal lines
-    if show_hline:
-        for n in np.arange(*ax.get_ylim())+1:
-            ax.axhline(n, color="#bbbbbb", linestyle="--", lw=0.5, 
-                       zorder=-1)
-    # ===============================================================
-
-    # Legends
-    # ===============================================================
-    legend = ax.legend(patches, labels, edgecolor="none", ncol=1,
-                       borderaxespad=0.25, markerscale=1.5, 
-                       columnspacing=0.3, labelspacing=0.7, 
-                       handletextpad=0.5, prop=dict(size=12), 
-                       loc='center left', facecolor="w") 
-    legend.set_bbox_to_anchor([1.01, 0.5], transform = ax.transAxes)
-    if tight_layout: plt.tight_layout()
-    # ===============================================================
-
-    return ax
-
-def workingdays(start, end, holidays=None):
-    
-    '''
-    Calculates which of the given dates are valid business days, and 
-    which are not.
-    
-    Parameters
-    ----------
-    start, end : datetime64[D] or str
-        Starting and ending dates e.g. "1999-12-25" (25th of December 
-        1999).
-    
-    holidays : array of datetime64[D], default=None
-        An array of dates to consider as invalid dates. They may be 
-        specified in any order, and NaT (not-a-time) dates are ignored. 
-    
-    Returns
-    -------
-    busday : array_like of datetime64[D]
-        An array of valid business days.
-    
-    '''
-    dates = np.arange(start, end, dtype="datetime64[D]")
-    if holidays is None: holidays = np.r_[np.datetime64('nat')]
-    holidays = np.array(holidays, dtype="datetime64[D]")
-    busday = dates[np.is_busday(dates, holidays=holidays)]
-    return busday
-
-def get_workload(X, resources, holidays=None, hours=8):
-    
-    '''
-    Parameters
-    ----------
-    X : pd.DataFrame object
-        A DataFrame with the following columns:
-
-        Column      Dtype           Description
-        ------      -----           -----------    
-        task        object          Task name
-        start       datetime64[ns]  Starting date
-        end         datetime64[ns]  Ending date
-        n_hours     float64         Working hours/person
-        resources   int64           Responsible persons
+    Results : collections.namedtuple
+        A dictionary subclass that contains fields as follows:
         
-    resources : list of str
-        List of numerical variables within `X` to be used as a 
-        resource matrix.
+        Field        Description
+        -----        -----------
+        metric       Evaluating metric
+        start_with   List of starting features
+        features     Selected features
+        cum_target   Cumulative number of targets
+        cum_sample   Cumulative number of samples
+        cum_lift     Cumulative lift
+        dec_lift     Decile lift
+        p_target     % target
+        p_sample     % sample
+        recall       Recall score
+        precision    Precision score
+        f1_score     F1 score
+        entropy      Entropy
         
-    holidays : array of datetime64[D], default=None
-        An array of dates to consider as invalid dates. They may be 
-        specified in any order, and NaT (not-a-time) dates are ignored.
+        Note: all outputs are arranged according to `features`
         
-    hours : float or 1D-array of shape (n_task,), default=8
-        If float, it is used as a fixed number of working hours per day,
-        otherwise array of working hours (float) must be provided.
-    
-    Returns
-    -------
-    workloads : dict
-        A dict of {"resource" : {"task": "number of working hours"}}
-
-    works : dict
-        A dict of {"resource": "number of works"}
-    
-    workhours : dict
-        A dict of {"resource": "Total number of working hours"}
-    
-    busdays : array of datetime64[D]
-        An array of business-day dates.
-    
     '''
-    # Valid business days
-    busdays = workingdays(X["start"].min(), 
-                          X["end"].max(), holidays)
-    
     # Initialize parameters
-    dtype = "datetime64[D]"
-    start = np.array(X["start"], dtype=dtype)
-    end   = np.array(X["end"]  , dtype=dtype)
-    tasks = X["task"].values.copy()
+    values = {"metric":metric, "start_with":start_with}
+    r_cum_lifts  , r_dec_lifts      = [], []
+    r_cum_targets, r_cum_samples    = [], [] 
+    recall_scores, precision_scores = [], []
+    f1_scores    , r_entropies      = [], []
     
-    # Responsibility matrix
-    resps = X[resources].values.copy() 
-    rescs = np.r_(resources).ravel()
+    if not isinstance(X, pd.DataFrame):
+        raise ValueError(f"`X` must be DataFrame, "
+                         f"Got {type(X)} instead.")
+    features  = np.array(X.columns)
+    X, target = np.array(X), np.r_[y].reshape(-1,1)
     
-    # Validate `hours`
-    if isinstance(hours, (int,float)):
-        hours = hours / X[resources].values.sum(axis=1)
-    elif not hasattr(hours, "__array__"):
-        raise ValueError("`hours` must be either a number "
-                         "or 1D-array")
-    else: hours = np.array(hours).ravel()
+    # Remaining, and current indices 
+    r_indices, c_indices = np.arange(len(features)), []
+    
+    # Convert `start_with` to an array of column indices.
+    if start_with is None:start_with = np.array([], dtype="int32")
+    else: start_with = r_indices[np.isin(features, start_with)]
         
-    workloads = dict([(r,{}) for r in rescs])
-    for n in range(len(tasks)):
+    # Convert `class_weights` to np.ndarray.
+    is_entropy = True if metric=="entropy" else False
+    class_weights = get_classweights(class_weights, y, is_entropy)
         
-        # Working hours given task
-        task = workingdays(start[n], end[n], holidays)
-        work = hours[n] * np.isin(busdays, task) 
+    while len(c_indices)<=len(r_indices):
         
-        # Assign working hours to responsible person(s)
-        workforces = rescs[resps[n,:]==1]
-        if len(workforces) > 0:
-            for w in workforces:
-                workloads[w].update({tasks[n]:work})
+        # Remaining features (sorted automatically)
+        r_indices = list(set(r_indices).difference(c_indices))
+
+        # Aantecedent and Consequent rules (n_samples,)
+        n_operands = 1 if operator=="or" else max(len(c_indices),1)
+        antecedent = X[:,c_indices].sum(axis=1,keepdims=True)>=n_operands
+        antecedent = antecedent.astype(int)
+        consequent = X[:,r_indices]
+            
+        # New rules
+        if (len(c_indices)==0) | (operator=="or"):
+            new_rules = (consequent + antecedent) >= 1
+        else: new_rules = (consequent + antecedent) >= 2
+        args = (target, new_rules.astype(int))
+        
+        # Lift components
+        (cum_targets, cum_samples, 
+         cum_lifts, dec_lifts) = lift_base(*(args + (antecedent,)))
+        
+        # Confusion matrix, recall, precision, f1, and Entropy
+        (tp, fp, fn, tn, new_recalls, 
+         new_precisions, new_f1s) = cfm_base(*args)
+        new_entropies = entropy_base(*(args + (class_weights,)))
+        
+        # Check metric crieria
+        if metric=="lift":
+            
+            pass_criteria = sum(dec_lifts>=min_lift) > 0
+            n = np.argmax(dec_lifts)
+            
+        elif metric=="precision":
+            
+            if len(precision_scores)==0: improve = new_precisions
+            else: improve = (new_precisions - precision_scores[-1])   
+            pass_criteria = sum(improve>0) > 0
+            n = np.argmax(improve)
+            
+        elif metric=="recall":
+            
+            if len(recall_scores)==0: improve = new_recalls
+            else: improve = (new_recalls - recall_scores[-1])
+            pass_criteria = sum(improve>0) > 0
+            n = np.argmax(improve)
+            
+        elif metric=="f1":
+            
+            if len(f1_scores)==0: improve = new_f1s
+            else: improve = (new_f1s - f1_scores[-1])
+            pass_criteria = sum(improve>0) > 0
+            n = np.argmax(improve)
+            
+        elif metric=="entropy":
+        
+            if len(r_entropies)==0: 
+                p = np.mean(target.ravel())
+                p0 = (1-p)*np.log2(1-p) if p<1 else 0
+                p1 = p*np.log2(p) if p>0 else 0
+                ent = -sum(np.r_[p0, p1] * class_weights)
+                improve = ent - new_entropies
+            else: improve = (r_entropies[-1] - new_entropies)
+            pass_criteria = sum(improve>0)>0
+            n = np.argmax(improve)
+      
+        else: pass
+        
+        # Need to pass metric criteria
+        if pass_criteria:
+            
+            # Select next `n` from `start_with`.
+            if len(start_with)>0: 
+                n = np.argmax(r_indices==start_with[0])
+                start_with = start_with[1:]
+            
+            # Cumulative and Per-decile lifts.
+            r_cum_lifts += [cum_lifts[n]]
+            r_dec_lifts += [dec_lifts[n]]
+            
+            # Cumulative targets and samples.
+            r_cum_targets += [cum_targets[n]]
+            r_cum_samples += [cum_samples[n]]
+            
+            # Recall, Precisions,  F1s, and Entropy
+            recall_scores += [new_recalls[n]]
+            precision_scores += [new_precisions[n]]
+            f1_scores += [new_f1s[n]]
+            r_entropies += [new_entropies[n]]
+            
+            # Adding index to `c_indices`
+            c_indices = np.r_[c_indices, r_indices[n]].astype(int)
+            
+        else: break
+
+    # Returning results
+    values.update({"features"   : features[c_indices], 
+                   "cum_target" : np.array(r_cum_targets), 
+                   "cum_sample" : np.array(r_cum_samples), 
+                   "cum_lift"   : np.array(r_cum_lifts), 
+                   "dec_lift"   : np.array(r_dec_lifts), 
+                   "p_target"   : np.array(r_cum_targets) / sum(y), 
+                   "p_sample"   : np.array(r_cum_samples) / len(y), 
+                   "recall"     : np.array(recall_scores), 
+                   "precision"  : np.array(precision_scores), 
+                   "f1_score"   : np.array(f1_scores), 
+                   "entropy"    : np.array(r_entropies)})
     
-    # Determine work amount & hour (`workloads`>0)
-    works, workhours = dict(), dict()
-    for key in workloads.keys():
-        v = np.r_[list(workloads[key].values())]
-        workhours.update({key:v.sum(0)})
-        works.update({key:(v>0).sum(0)})
+    return collections.namedtuple("Results", values.keys())(**values)
+
+def get_classweights(class_weights, y, is_entropy):
     
-    return workloads, works, workhours, busdays
+    '''
+    `class_weights`.
+    
+    Parameters
+    ----------
+    class_weights : str or dict {class_label: weight}
+    y : np.ndarray, of shape (n_samples,)
+    is_entropy : bool
+    
+    Returns
+    -------
+    class_weights : np.ndarray of shape (n_classes,)
+    
+    '''
+    n_classes = len(np.unique(y))
+    if (class_weights=="balanced") & is_entropy:
+        return len(y)/(n_classes*np.bincount(y)) 
+    elif isinstance(class_weights, dict) & is_entropy:
+        return np.array([class_wights[c] for c in np.unique(y)])
+    else: return np.ones(n_classes)
+
+def lift_base(y_true, y_pred, y_prev):
+    
+    '''
+    Cumulative and decile lifts.
+    
+    Parameters
+    ----------
+    y_true : np.ndarray, of shape (n_samples, 1)
+    y_pred : np.ndarray, of shape (n_samples, n_features)
+    y_prev : np.ndarray, of shape (n_samples, 1)
+    
+    Returns
+    -------
+    cum_targets, cum_samples, cum_lifts, dec_lifts
+    
+    '''
+    # Number of targets and samples
+    n_targets, n_samples  = sum(y_true), len(y_true)
+    
+    # Cumulative number of targets and samples by varibale
+    # of shape (n_features,)
+    cum_targets = ((y_pred + y_true)==2).sum(axis=0).astype(int)
+    cum_samples = (y_pred==1).sum(axis=0)
+
+    # Cumulative number of existing targets,and samples.
+    ext_targets = sum((y_prev + y_true)==2)
+    ext_samples = sum(y_prev)
+
+    # Calculate change of targets and samples (n_features,)
+    delta_t = (cum_targets - ext_targets) / n_targets 
+    delta_s = (cum_samples - ext_samples) / n_samples 
+
+    # Cumulative, and Per-decile lifts
+    denom = np.fmax(cum_samples, 0.5) / n_samples
+    cum_lifts = (cum_targets/n_targets) / denom
+    dec_lifts = delta_t / np.where(delta_s==0, 1, delta_s)
+        
+    return cum_targets, cum_samples, cum_lifts, dec_lifts
+
+def cfm_base(y_true, y_pred):
+    
+    '''
+    Confusion matrix.
+    
+    Parameters
+    ----------
+    y_true : np.ndarray, of shape (n_samples, 1)
+    y_pred : np.ndarray, of shape (n_samples, n_features)
+    
+    Returns
+    -------
+    tp, fp, fn, tn, recall, precision, f1
+    
+    '''
+    tp = ((y_pred==1) & (y_true==1)).sum(0)
+    fp = ((y_pred==1) & (y_true==0)).sum(0)
+    fn = ((y_pred==0) & (y_true==1)).sum(0)
+    tn = ((y_pred==0) & (y_true==0)).sum(0)
+    recall = tp / np.fmax(tp + fn, 1)
+    precision = tp / np.fmax(tp + fp, 1)
+    denom = np.fmax(recall + precision, 1)
+    f1 = (2 * recall * precision) / denom
+    return tp, fp, fn, tn, recall, precision, f1
+
+def entropy_base(y_true, y_pred, class_weights):
+    
+    '''
+    Entropy (Information Gain).
+    
+    Parameters
+    ----------
+    y_true : np.ndarray, of shape (n_samples, 1)
+    y_pred : np.ndarray, of shape (n_samples, n_features)
+    class_weights : np.ndarray, of shape (n_classes,)
+    
+    Returns
+    -------
+    Entropies : np.ndarray, of shape (n_features,)
+    
+    '''
+    n_features = y_pred.shape[1]
+    Entropies = np.zeros(n_features)
+    for c in range(n_features):
+        ent, new_x = 0, y_pred[:,c]
+        unq, cnt = np.unique(new_x, return_counts=True)
+        w = cnt/sum(cnt)
+        for n,k in enumerate(unq):
+            p = np.mean(y_true[new_x==k,:])
+            p0 = (1-p)*np.log2(1-p) if p<1 else 0
+            p1 = p*np.log2(p) if p>0 else 0
+            ent += -w[n] * sum(np.r_[p0, p1] * class_weights)
+        Entropies[c] = ent
+    return Entropies
+
+class AssoRuleMining:
+    
+    '''
+    Using the similar principle as "Association rule", but instead of 
+    measuring on "confidence" or "support", it focuses on class 
+    attribute i.e. "1" and finds the best RHS (a consequent rule) that
+    maximizes selected metric e.g. precision, or decile-lift given LHS
+    (antecedent rules).
+    
+    Parameters
+    ----------
+    metric : str, default="entropy"
+        The function to evaluate the quality of rule (RHS). Supported 
+        criteria are "lift" for the decile lift, "recall" for the 
+        recall, "precision" for the precision, "f1" for the balanced 
+        F-score, and "entropy" for the information gain. 
+    
+    operator : {"or", "and"}, default="or"
+        If "or", "or" operator is assigned as a relationship between 
+        antecedent and consequent rules (n_operands > 0). If "and", 
+        "and" operator is assigned (n_operands > 1).
+       
+    min_lift : float, default=1
+        The minimum per-decile lift required to continue. This is 
+        relevant when metric is "lift".
+    
+    class_weights : "balanced" or dict, default=None
+        Weights associated with classes in the form {class_label: 
+        weight}. If not given, all classes are supposed to have weight 
+        one. The "balanced" mode uses the values of y to automatically 
+        adjust weights inversely proportional to class frequencies in 
+        the input data as n_samples / (n_classes * np.bincount(y)).
+        This is relevant when metric is "entropy".
+    
+    Attributes
+    ----------
+    asso_results_ : dict of collections.namedtuple
+        A dict with keys as antecedent variables (`start_with` 
+        excluded), and namedtuple ("Results") as values, whose fields
+        are as follows:
+    
+        Field        Description
+        -----        -----------
+        metric       Evaluating metric
+        start_with   List of starting features
+        features     Selected features
+        cum_target   Cumulative number of targets
+        cum_sample   Cumulative number of samples
+        cum_lift     Cumulative lift
+        dec_lift     Decile lift
+        p_target     % target
+        p_sample     % sample
+        recall       Recall score
+        precision    Precision score
+        f1_score     F1 score
+        entropy      Entropy
+        
+        Note: all outputs are arranged according to `features`
+        
+    info : dict of numpy (masked) ndarrays
+        A dict with keys as column headers. It can be imported into a 
+        pandas DataFrame, whose fields are as follows:
+
+        Field       Description
+        -----       -----------
+        start_with  List of starting features
+        variable    First consequent rule (RHS)
+        n_features  Number of features
+        p_target    % target
+        p_sample    % sample
+        recall      Recall score
+        precision   Precision score
+        f1_score    F1 score
+        entropy     Entropy
+        
+    '''
+    def __init__(self, metric="entropy", operator="or", 
+                 min_lift=1, class_weights=None):
+        
+        # Keyword arguments for `AssoRule_base`.
+        self.kwargs = {"metric" : metric, 
+                       "operator" : operator, 
+                       "min_lift" : min_lift, 
+                       "class_weights" : class_weights}
+     
+    def fit(self, X, y, start_with=None):
+        
+        '''
+        Fit model.
+
+        Parameters
+        ----------
+        X : pd.DataFrame, shape of (n_samples , n_features)
+            Binary variables
+
+        y : array-like of shape (n_samples,)
+            Target values (binary)
+
+        start_with : list of str, optional, default: None
+            List of starting features. If None, the first variable that 
+            has the highest score from specified `metric` will be 
+            seleceted.
+ 
+        '''
+        # Initialize widgets
+        w1 = widgets.HTMLMath(value='Calculating . . .')
+        w2 = widgets.HTMLMath(value='')
+        w = widgets.HBox([w1, w2])
+        display(w); time.sleep(1)
+        
+        # Initialize parameters.
+        start = time.time()
+        self.asso_results_ = dict()
+        kwds = {**self.kwargs, **dict(start_with=start_with)}
+        if start_with is None: start_with = []
+        features = np.r_[list(X)]
+        features = features[~np.isin(features,start_with)]
+        n_features = len(features)
+        
+        t = "Start with: {:} ({:,.0%})".format
+        for n,var in enumerate(features,1):
+            if len(start_with)==0: s = var
+            else: s = ", ".join(start_with) + " >>> " + var
+            w1.value =  t(s, n/n_features)
+            kwds.update({"start_with": start_with + [var]})
+            self.asso_results_[var] = AssoRule_base(X, y, **kwds)
+        
+        w1.value = 'Number of features : %d' % n_features
+        r_time = time.gmtime(time.time() - start)
+        r_time = time.strftime("%H:%M:%S", r_time)
+        w2.value = ', Total running time: {}'.format(r_time)
+        self.start_with = start_with
+        
+        # Create attribute `info`.
+        self.__CreateInfo__()
+        
+        return self
+        
+    def __CreateInfo__(self):
+        
+        '''
+        Summary of all combinations.
+        
+        Attributes
+        ----------
+        info : dict of numpy (masked) ndarrays
+            A dict with keys as column headers. It can be imported into a 
+            pandas DataFrame, whose fields are as follows:
+
+            Field       Description
+            -----       -----------
+            start_with  List of starting features
+            variable    First consequent rule (RHS)
+            n_features  Number of features
+            p_targets   % targets
+            p_samples   % samples
+            recalls     Recall scores
+            precisions  Precision scores
+            f1_scores   F1 scores
+            entropies   Entropies
+            
+        '''
+        data = []
+        if len(self.start_with)==0: start = None
+        else: start = ", ".join(self.start_with) 
+        for var in self.asso_results_.keys():
+            a = self.asso_results_[var]
+            data += [{"start_with" : start, 
+                      "variable"   : var,
+                      "n_features" : len(a.features), 
+                      "p_target"   : a.p_target[-1], 
+                      "p_sample"   : a.p_sample[-1], 
+                      "f1_score"   : a.f1_score[-1],
+                      "recall"     : a.recall[-1], 
+                      "precision"  : a.precision[-1],
+                      "entropy"    : a.entropy[-1]}]
+        self.info = pd.DataFrame(data).to_dict(orient="list")
+
+def evaluate_rules(eval_set):
+    
+    '''
+    Evaluate set of rules (binary).
+    
+    Parameters
+    ----------  
+    eval_set : list of tuples
+        A list of tuples, where first item is X of shape (n_samples, 
+        n_features) and the seccond item is y of shape (n_samples,) 
+        e.g. [(X0, y0), (X1, y1)]. 
+        
+    Returns
+    -------
+    EvalResults : collections.namedtuple
+        A dictionary subclass that contains fields as follows:
+    
+        Field      Description
+        -----      -----------
+        tp         True positive
+        fp         False positive
+        fn         False negative
+        tn         True negative
+        recall     Recall scores
+        precision  Precision scores
+        f1         F1 scores
+        
+        Note: all outputs are arranged according to `eval_set`
+    
+    '''
+    if not isinstance(eval_set, list):
+        raise ValueError(f"`eval_set` has to be list. "
+                         f"Got {type(eval_set)} instead.")
+    
+    data = {"tp":[], "fp":[], "fn":[], "tn":[], 
+            "recall":[], "precision":[], "f1":[]}
+
+    for X,y in eval_set:
+        y_pred = (np.array(X).sum(1)>0).astype(int)
+        y_true = np.array(y)
+        tp, fp, fn, tn, recall, precision, f1 = cfm_base(y_true, y_pred)
+        data["tp"] += [tp]
+        data["fp"] += [fp]
+        data["fn"] += [fn]
+        data["tn"] += [tn]
+        data["precision"] += [precision]
+        data["recall"] += [recall]
+        data["f1"] += [f1]
+    return collections.namedtuple("EvalResults", 
+                                  data.keys())(**data)
+
+def column_dtype(X, max_category=100):
+    
+    '''
+    This function converts columns to best possible dtypes which are 
+    "float32", "int32" (boolean), "category", and "object". However, 
+    it ignores columns, whose dtype is either np.datetime64 or 
+    np.timedelta64.
+    
+    Parameters
+    ----------
+    X : pd.DataFrame
+        Input array.
+    
+    max_category : int, default=100
+        If number of unique elements from column with "object" dtype, 
+        is less than or equal to max_category, its dtype will be 
+        converted to "category". max_category must be greater than or 
+        equal to 2.
+    
+    Returns
+    -------
+    Converted_X : pd.DataFrame
+    
+    '''
+    # Select columns, whose dtype is neither datetimes, nor timedeltas.
+    exclude = [np.datetime64, np.timedelta64] 
+    columns = list(X.select_dtypes(exclude=exclude))
+    
+    if isinstance(max_category, int): 
+        max_category = max(2, max_category)
+    else: max_category = 100
+    
+    # Replace pd.isnull() with np.nan
+    Converted_X = X.copy()
+    Converted_X.iloc[:,:] = np.where(X.isnull(), np.nan, X)
+    
+    for var in columns:
+        x = Converted_X[var].copy()
+        try:
+            float32 = x.astype("float32")
+            if np.isnan(float32).sum()==0:
+                int32 = x.astype("int32")
+                if (int32-float32).sum()==0: Converted_X[var] = int32
+                else: Converted_X[var] = float32
+            else: Converted_X[var] = float32 
+        except:
+            objtype = x.astype("object")
+            n_unq = len(objtype.unique())
+            if n_unq<=max_category:
+                Converted_X[var] = x.astype(str).astype("category") 
+            else: Converted_X[var] = objtype
+    return Converted_X
+
+def to_DataFrame(X) -> pd.DataFrame:
+    
+    '''
+    If `X` is not `pd.DataFrame`, column(s) will be automatically 
+    created with "Unnamed" format.
+    
+    Parameters
+    ----------
+    X : array-like or pd.DataFrame
+    
+    '''
+    if not (hasattr(X,'shape') or hasattr(X,'__array__')):
+        raise TypeError(f'Data must be array-like. '
+                        f'Got {type(X)} instead.')
+    elif isinstance(X, pd.Series):
+        return pd.DataFrame(X)
+    elif not isinstance(X, pd.DataFrame):
+        try:
+            z = int(np.log(X.shape[1])/np.log(10)+1)
+            columns = ['Unnamed_{}'.format(str(n).zfill(z)) 
+                       for n in range(1,X.shape[1]+1)]
+        except: columns = ['Unnamed']
+        return pd.DataFrame(X, columns=columns)
+    return X
