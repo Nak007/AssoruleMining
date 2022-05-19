@@ -2,6 +2,8 @@
 Available methods are the followings:
 [1] AssoRuleMining
 [2] evaluate_rules
+[3] define_dtype
+[4] discretize
 
 Authors: Danusorn Sitdhirasdr <danusorn.si@gmail.com>
 versionadded:: 30-05-2022
@@ -15,7 +17,9 @@ import inspect
 from itertools import combinations
 
 __all__  = ["AssoRuleMining",
-            "evaluate_rules"]
+            "evaluate_rules", 
+            "define_dtype",
+            "discretize"]
 
 def AssoRule_base(X, y, start_with=None, metric="entropy", operator="or",
                   min_lift=1, class_weights=None):
@@ -566,7 +570,7 @@ def evaluate_rules(eval_set):
     return collections.namedtuple("EvalResults", 
                                   data.keys())(**data)
 
-def column_dtype(X, max_category=100):
+def define_dtype(X, max_category=100):
     
     '''
     This function converts columns to best possible dtypes which are 
@@ -576,7 +580,7 @@ def column_dtype(X, max_category=100):
     
     Parameters
     ----------
-    X : pd.DataFrame
+    X : pd.DataFrame, of shape (n_samples, n_features)
         Input array.
     
     max_category : int, default=100
@@ -643,3 +647,89 @@ def to_DataFrame(X) -> pd.DataFrame:
         except: columns = ['Unnamed']
         return pd.DataFrame(X, columns=columns)
     return X
+
+def discretize(X, n_cutoffs=10, decimal=4, equal_width=False, 
+               start_index=0):
+
+    '''
+    Discretization is the process through which continuous variables 
+    can be transformed into a discrete form through use of intervals 
+    (or bins). 
+    
+    Parameters
+    ----------
+    X : pd.DataFrame, of shape (n_samples, n_features)
+        Input data.
+
+    n_cutoffs : int, default=10
+        Number of cutoffs. This number could be less than `n_cutoffs` 
+        due to rounding of decimals and uniqueness of values.
+    
+    decimal : int, default=None
+        Rounding decimals of bin-edges. If None, rounding is ignored.
+    
+    equal_width : bool, default=False
+        If True, it uses equal-width binning, otherwise equal-sample 
+        binning is used instead.
+        
+    start_index : int, default=0
+        Starting index of columns.
+        
+    Returns
+    -------
+    discr_X : pd.DataFrame of (n_samples, n_discretized)
+        Discretized variables.
+        
+    conditions : dict
+        A dict with keys as column headers or indices in `discr_X`, 
+        and values as interval e.g. ("feature", ">", 10)
+
+    '''
+    # Initialize parameters
+    features, n_samples = list(X), len(X)
+    arr, conditions, index = [],  {}, int(start_index)-1
+    num_dtypes = ["float32", "float64", "int32", "int64"]
+    for var in features:
+        x = X[[var]].values
+        
+        if str(X[var].dtype) in num_dtypes:
+            
+            bins = cal_bins(x, n_cutoffs, equal_width)
+            if decimal is not None:
+                bins = np.unique(np.round(bins, decimal)) 
+            shape= (n_samples, len(bins))
+
+            # Create varialbes
+            for attr, sign in [("less","<"), ("greater_equal",">=")]:
+                arr += [getattr(np,attr)(np.full(shape, x)-bins,0)]
+                conditions.update(dict([(n,(var, sign, v)) for n,v in 
+                                        enumerate(bins, index + 1)]))
+                index += len(bins)
+        else:
+            categories = np.unique(x)
+            arr += [np.hstack([x==c for c in categories])]
+            conditions.update(dict([(n,(var, "==", v)) for n,v in 
+                                    enumerate(categories, index + 1)]))
+            index += len(categories)
+            
+    discr_X = pd.DataFrame(np.hstack(arr).astype(int))
+    return discr_X, conditions
+
+def cal_bins(x, bins, equal_width=True):
+        
+    '''
+    According to binning method (equal-width or equal-sample),this 
+    function generates 1-dimensional and monotonic array of bins. The 
+    last bin edge is the maximum value in x plus np.finfo("float32").
+    eps.
+
+    '''
+    bins = np.fmax(bins, 2) + 1
+    if equal_width: 
+        args = (np.nanmin(x), np.nanmax(x), bins)
+        bins = np.linspace(*args)
+    elif equal_width==False:
+        q = np.linspace(0, 100, bins)
+        bins = np.unique(np.nanpercentile(x, q))
+    bins[-1] = bins[-1] + np.finfo("float32").eps
+    return bins
