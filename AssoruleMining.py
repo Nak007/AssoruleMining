@@ -1,9 +1,9 @@
 '''
 Available methods are the followings:
 [1] AssoRuleMining
-[2] evaluate_rules
-[3] define_dtype
-[4] discretize
+[2] define_dtype
+[3] discretize
+[4] from_conditons
 
 Authors: Danusorn Sitdhirasdr <danusorn.si@gmail.com>
 versionadded:: 30-05-2022
@@ -16,10 +16,10 @@ import ipywidgets as widgets
 import inspect
 from itertools import combinations
 
-__all__  = ["AssoRuleMining",
-            "evaluate_rules", 
+__all__  = ["AssoRuleMining", 
             "define_dtype",
-            "discretize"]
+            "discretize",
+            "from_conditons"]
 
 def AssoRule_base(X, y, start_with=None, metric="entropy", operator="or",
                   min_lift=1, class_weights=None):
@@ -681,7 +681,7 @@ def discretize(X, n_cutoffs=10, decimal=4, equal_width=False,
         Discretized variables.
         
     conditions : dict
-        A dict with keys as column headers or indices in `discr_X`, 
+        A dict with keys as column headers (indices) in `discr_X`, 
         and values as interval e.g. ("feature", ">", 10)
 
     '''
@@ -733,3 +733,46 @@ def cal_bins(x, bins, equal_width=True):
         bins = np.unique(np.nanpercentile(x, q))
     bins[-1] = bins[-1] + np.finfo("float32").eps
     return bins
+
+def from_conditons(X, conditions, which, operator="and"):
+    
+    '''
+    Create an array of bool from specified conditions.
+    
+    Parameters
+    ----------
+    X : pd.DataFrame, of shape (n_samples, n_features)
+        Input data.
+    
+    conditions : dict
+        An output from `discretize`.
+        
+    which : list of int
+        A list of selected keys in `conditions`.
+        
+    operator : {"or", "and"}, default="and"
+        If "or", "or" operator is assigned as a relationship between 
+        antecedent and consequent rules in `conditions`. If "and", 
+        "and" operator is assigned.
+    
+    Returns
+    -------
+    bool_cond : np.ndarray of shape (n_samples,)
+        An array of boolean 
+        
+    str_cond : list of tuples
+        A list of condition tuples.
+    
+    '''
+    fill_value = True if operator=="and" else False
+    bool_cond, str_cond = np.full(len(X),fill_value), []
+    fnc = {"<": np.less, ">=": np.greater_equal, "==":np.equal}
+    for m in which:
+        var, sign, value = conditions[m]
+        try: val = float(value)
+        except: val = "'{}'".format(value) 
+        str_cond  += ["('{}'{}{})".format(var,sign,val)] 
+        bools = fnc[sign](X[var].values, value)
+        if operator=="and": bool_cond &= bools
+        else: bool_cond |= bools
+    return bool_cond, str_cond
