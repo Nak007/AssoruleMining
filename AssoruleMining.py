@@ -3,26 +3,37 @@ Available methods are the followings:
 [1] AssoRuleMining
 [2] define_dtype
 [3] discretize
-[4] from_conditons
+[4] RuleToFeature
+[5] print_stats
+[6] print_rule
+[7] evaluate_rules
+[8] create_rule
 
 Authors: Danusorn Sitdhirasdr <danusorn.si@gmail.com>
 versionadded:: 30-05-2022
 
 '''
 import pandas as pd, numpy as np, time, os
-import collections
+from collections import namedtuple
 from IPython.display import display
 import ipywidgets as widgets
-import inspect
-from itertools import combinations
+import multiprocessing
+from joblib import Parallel, delayed
+from functools import partial
+from prettytable import PrettyTable
+from sklearn.metrics import (confusion_matrix,f1_score)
 
 __all__  = ["AssoRuleMining", 
             "define_dtype",
             "discretize",
-            "from_conditons"]
+            "RuleToFeature",
+            "print_stats",
+            "print_rule", 
+            "evaluate_rules",
+            "create_rule"]
 
-def AssoRule_base(X, y, start_with=None, metric="entropy", operator="or",
-                  min_lift=1, class_weights=None):
+def AssoRule_base(X, y, start_with=None, metric="entropy", operator="and",
+                  min_lift=1, class_weights=None, rules=None):
     
     '''
     Using the similar principle as "Association rule", but instead of 
@@ -44,7 +55,7 @@ def AssoRule_base(X, y, start_with=None, metric="entropy", operator="or",
         has the highest score from specified `metric` will be 
         seleceted.
     
-    operator : {"or", "and"}, default="or"
+    operator : {"or", "and"}, default="and"
         If "or", "or" operator is assigned as a relationship between 
         antecedent and consequent rules (n_operands > 0). If "and", 
         "and" operator is assigned (n_operands > 1).
@@ -67,6 +78,13 @@ def AssoRule_base(X, y, start_with=None, metric="entropy", operator="or",
         the input data as n_samples / (n_classes * np.bincount(y)).
         This is relevant when metric is "entropy".
     
+    rules : dict, default=None
+        A dict with keys as column headers in `X`, and values as 
+        interval e.g. {"0": ("feature", ">", 10)}. If provided, `rule` 
+        will be added to `asso_results_`. It contains a list of 
+        subrules, which defines the specific intervals of a broader
+        rule.
+    
     Returns
     -------
     Results : collections.namedtuple
@@ -75,6 +93,7 @@ def AssoRule_base(X, y, start_with=None, metric="entropy", operator="or",
         Field        Description
         -----        -----------
         metric       Evaluating metric
+        operator     Relationship between rules
         start_with   List of starting features
         features     Selected features
         cum_target   Cumulative number of targets
@@ -87,12 +106,15 @@ def AssoRule_base(X, y, start_with=None, metric="entropy", operator="or",
         precision    Precision score
         f1_score     F1 score
         entropy      Entropy
+        rule         A list of subrules
         
         Note: all outputs are arranged according to `features`
         
     '''
     # Initialize parameters
-    values = {"metric":metric, "start_with":start_with}
+    values = {"metric": metric,
+              "operator": operator, 
+              "start_with": start_with}
     r_cum_lifts  , r_dec_lifts      = [], []
     r_cum_targets, r_cum_samples    = [], [] 
     recall_scores, precision_scores = [], []
@@ -210,6 +232,8 @@ def AssoRule_base(X, y, start_with=None, metric="entropy", operator="or",
         else: break
 
     # Returning results
+    if rules is None: rule = None
+    else: rule = [rules[f] for f in features[c_indices]]
     values.update({"features"   : features[c_indices], 
                    "cum_target" : np.array(r_cum_targets), 
                    "cum_sample" : np.array(r_cum_samples), 
@@ -220,9 +244,10 @@ def AssoRule_base(X, y, start_with=None, metric="entropy", operator="or",
                    "recall"     : np.array(recall_scores), 
                    "precision"  : np.array(precision_scores), 
                    "f1_score"   : np.array(f1_scores), 
-                   "entropy"    : np.array(r_entropies)})
+                   "entropy"    : np.array(r_entropies), 
+                   "rule"       : rule})
     
-    return collections.namedtuple("Results", values.keys())(**values)
+    return namedtuple("Results", values.keys())(**values)
 
 def get_classweights(class_weights, y, is_entropy):
     
@@ -369,11 +394,11 @@ class AssoRuleMining:
     
     class_weights : "balanced" or dict, default=None
         Weights associated with classes in the form {class_label: 
-        weight}. If not given, all classes are supposed to have weight 
-        one. The "balanced" mode uses the values of y to automatically 
-        adjust weights inversely proportional to class frequencies in 
-        the input data as n_samples / (n_classes * np.bincount(y)).
-        This is relevant when metric is "entropy".
+        weight}. If not given, all classes are supposed to have 
+        weight one. The "balanced" mode uses the values of y to 
+        automatically adjust weights inversely proportional to class 
+        frequencies in the input data as n_samples / (n_classes * 
+        np.bincount(y)). This is relevant when metric is "entropy".
     
     Attributes
     ----------
@@ -385,6 +410,7 @@ class AssoRuleMining:
         Field        Description
         -----        -----------
         metric       Evaluating metric
+        operator     Relationship between rules
         start_with   List of starting features
         features     Selected features
         cum_target   Cumulative number of targets
@@ -397,12 +423,14 @@ class AssoRuleMining:
         precision    Precision score
         f1_score     F1 score
         entropy      Entropy
+        rule         A list of subrules
         
         Note: all outputs are arranged according to `features`
         
     info : dict of numpy (masked) ndarrays
-        A dict with keys as column headers. It can be imported into a 
-        pandas DataFrame, whose fields are as follows:
+        A summary table that comes in a form of dict with keys as 
+        column headers. It can be imported into a pandas DataFrame, 
+        whose fields are as follows:
 
         Field       Description
         -----       -----------
@@ -426,7 +454,7 @@ class AssoRuleMining:
                        "min_lift" : min_lift, 
                        "class_weights" : class_weights}
      
-    def fit(self, X, y, start_with=None):
+    def fit(self, X, y, start_with=None, rules=None):
         
         '''
         Fit model.
@@ -443,6 +471,13 @@ class AssoRuleMining:
             List of starting features. If None, the first variable that 
             has the highest score from specified `metric` will be 
             seleceted.
+        
+        rules : dict, default=None
+            A dict with keys as column headers in `X`, and values as 
+            interval e.g. {"0": ("feature", ">", 10)}. If provided, `rule` 
+            will be added to `asso_results_`. It contains a list of 
+            subrules, which defines the specific intervals of a broader
+            rule.
  
         '''
         # Initialize widgets
@@ -454,7 +489,8 @@ class AssoRuleMining:
         # Initialize parameters.
         start = time.time()
         self.asso_results_ = dict()
-        kwds = {**self.kwargs, **dict(start_with=start_with)}
+        kwds = {**self.kwargs, 
+                **dict(start_with=start_with, rules=rules)}
         if start_with is None: start_with = []
         features = np.r_[list(X)]
         features = features[~np.isin(features,start_with)]
@@ -519,61 +555,10 @@ class AssoRuleMining:
                       "entropy"    : a.entropy[-1]}]
         self.info = pd.DataFrame(data).to_dict(orient="list")
 
-def evaluate_rules(eval_set):
-    
-    '''
-    Evaluate set of rules (binary).
-    
-    Parameters
-    ----------  
-    eval_set : list of tuples
-        A list of tuples, where first item is X of shape (n_samples, 
-        n_features) and the seccond item is y of shape (n_samples,) 
-        e.g. [(X0, y0), (X1, y1)]. 
-        
-    Returns
-    -------
-    EvalResults : collections.namedtuple
-        A dictionary subclass that contains fields as follows:
-    
-        Field      Description
-        -----      -----------
-        tp         True positive
-        fp         False positive
-        fn         False negative
-        tn         True negative
-        recall     Recall scores
-        precision  Precision scores
-        f1         F1 scores
-        
-        Note: all outputs are arranged according to `eval_set`
-    
-    '''
-    if not isinstance(eval_set, list):
-        raise ValueError(f"`eval_set` has to be list. "
-                         f"Got {type(eval_set)} instead.")
-    
-    data = {"tp":[], "fp":[], "fn":[], "tn":[], 
-            "recall":[], "precision":[], "f1":[]}
-
-    for X,y in eval_set:
-        y_pred = (np.array(X).sum(1)>0).astype(int)
-        y_true = np.array(y)
-        tp, fp, fn, tn, recall, precision, f1 = cfm_base(y_true, y_pred)
-        data["tp"] += [tp]
-        data["fp"] += [fp]
-        data["fn"] += [fn]
-        data["tn"] += [tn]
-        data["precision"] += [precision]
-        data["recall"] += [recall]
-        data["f1"] += [f1]
-    return collections.namedtuple("EvalResults", 
-                                  data.keys())(**data)
-
 def define_dtype(X, max_category=100):
     
     '''
-    This function converts columns to best possible dtypes which are 
+    This function converts columns to possible dtypes which are 
     "float32", "int32" (boolean), "category", and "object". However, 
     it ignores columns, whose dtype is either np.datetime64 or 
     np.timedelta64.
@@ -626,6 +611,7 @@ def define_dtype(X, max_category=100):
 def to_DataFrame(X) -> pd.DataFrame:
     
     '''
+    ** Private Function **
     If `X` is not `pd.DataFrame`, column(s) will be automatically 
     created with "Unnamed" format.
     
@@ -680,15 +666,16 @@ def discretize(X, n_cutoffs=10, decimal=4, equal_width=False,
     discr_X : pd.DataFrame of (n_samples, n_discretized)
         Discretized variables.
         
-    conditions : dict
+    rules : dict
         A dict with keys as column headers (indices) in `discr_X`, 
         and values as interval e.g. ("feature", ">", 10)
 
     '''
     # Initialize parameters
     features, n_samples = list(X), len(X)
-    arr, conditions, index = [],  {}, int(start_index)-1
+    arr, rules, index = [],  {}, int(start_index)-1
     num_dtypes = ["float32", "float64", "int32", "int64"]
+
     for var in features:
         x = X[[var]].values
         
@@ -702,18 +689,19 @@ def discretize(X, n_cutoffs=10, decimal=4, equal_width=False,
             # Create varialbes
             for attr, sign in [("less","<"), ("greater_equal",">=")]:
                 arr += [getattr(np,attr)(np.full(shape, x)-bins,0)]
-                conditions.update(dict([(n,(var, sign, v)) for n,v in 
-                                        enumerate(bins, index + 1)]))
+                rules.update(dict([(n,(var, sign, v)) for n,v in 
+                                   enumerate(bins, index + 1)]))
                 index += len(bins)
         else:
             categories = np.unique(x)
             arr += [np.hstack([x==c for c in categories])]
-            conditions.update(dict([(n,(var, "==", v)) for n,v in 
-                                    enumerate(categories, index + 1)]))
+            rules.update(dict([(n,(var, "==", v)) for n,v in 
+                               enumerate(categories, index + 1)]))
             index += len(categories)
             
     discr_X = pd.DataFrame(np.hstack(arr).astype(int))
-    return discr_X, conditions
+    discr_X.columns = range(start_index, index+1)
+    return discr_X, rules
 
 def cal_bins(x, bins, equal_width=True):
         
@@ -734,45 +722,266 @@ def cal_bins(x, bins, equal_width=True):
     bins[-1] = bins[-1] + np.finfo("float32").eps
     return bins
 
-def from_conditons(X, conditions, which, operator="and"):
+def RuleToFeature(X, asso_results_, which_rules=None):
     
     '''
-    Create an array of bool from specified conditions.
+    Convert rules into features array.
     
     Parameters
     ----------
     X : pd.DataFrame, of shape (n_samples, n_features)
         Input data.
     
-    conditions : dict
-        An output from `discretize`.
-        
-    which : list of int
-        A list of selected keys in `conditions`.
-        
-    operator : {"or", "and"}, default="and"
-        If "or", "or" operator is assigned as a relationship between 
-        antecedent and consequent rules in `conditions`. If "and", 
-        "and" operator is assigned.
+    asso_results_ : dict of collections.namedtuple
+        An attribute from fitted `AssoRuleMining`. The conversion
+        requires that every key must contain a list of subrules i.e.
+        a field, namely "rule" must not be None.
+    
+    which_rules : list of keys, default=None
+        A list of selectd keys in `asso_results_`. If None, all keys
+        will be converted.
     
     Returns
     -------
-    bool_cond : np.ndarray of shape (n_samples,)
-        An array of boolean 
-        
-    str_cond : list of tuples
-        A list of condition tuples.
+    Converted_X : pd.DataFrame of shape (n_samples, n_rules)
+        A converted X.
+    
+    rules : dict
+        A dict with keys as column headers (indices) in `Converted_X`, 
+        and values as tuple subclass named "Rule" e.g. 
+        Rule(rule=[('feature', '==', '0')]).
     
     '''
-    fill_value = True if operator=="and" else False
-    bool_cond, str_cond = np.full(len(X),fill_value), []
-    fnc = {"<": np.less, ">=": np.greater_equal, "==":np.equal}
-    for m in which:
-        var, sign, value = conditions[m]
-        try: val = float(value)
-        except: val = "'{}'".format(value) 
-        str_cond  += ["('{}'{}{})".format(var,sign,val)] 
-        bools = fnc[sign](X[var].values, value)
-        if operator=="and": bool_cond &= bools
-        else: bool_cond |= bools
-    return bool_cond, str_cond
+    # Initialize parameters
+    Converted_X, rules = [], dict()
+    Rule = namedtuple("Rule",["rule","operator"])
+    func = {"==": np.equal, "<": np.less, 
+            ">=": np.greater_equal}
+    
+    # Determine number of rules to be converted.
+    keys = np.r_[list(asso_results_.keys())]
+    which_rules = (keys[np.isin(keys, which_rules)] 
+                   if which_rules is not None else keys)
+
+    for key in which_rules:
+        # Store an array of converted rule and rule details.
+        result = asso_results_[key]
+        Converted_X += [rule_alert(X.copy(), result).reshape(-1,1)]
+        rules[key] = Rule(*(result.rule, result.operator))
+        
+    Converted_X = pd.DataFrame(np.hstack(Converted_X),
+                               columns=which_rules)        
+    return Converted_X, rules
+
+def rule_alert(X:pd.DataFrame, rule:namedtuple) -> np.ndarray:
+    '''
+    ** Private Function **
+    It return True or False given rule (A tuple subclass named 
+    "Results")
+    '''
+    func = {"==": np.equal  , "!=": np.not_equal,
+            "<" : np.less   , "<=": np.less_equal,
+            ">" : np.greater, ">=": np.greater_equal,}
+    bools = np.hstack([func[sign](X[var].values, value).reshape(-1,1) 
+                       for var, sign, value in rule.rule]).sum(1)
+    if rule.operator=="or": return bools > 0
+    else: return bools == len(rule.rule)
+
+def print_stats(y_true, y_pred, decimal=1):
+    
+    '''
+    Prints the summary table.
+    
+    Parameters
+    ----------
+    y_true : 1d array-like, or label indicator array
+        Ground truth (correct) target values.
+
+    y_pred : 1d array-like, or label indicator array
+        Estimated targets.
+        
+    decimal : int, default=1
+        Decimal place for %.
+
+    Example
+    -------
+    >>> print_stats(y_true, y_pred)
+    
+    +----------------+-------+-------+
+    | Statistics     | Value |     % |
+    +----------------+-------+-------+
+    | N              | 7,000 |       |
+    | Target         |   581 |  8.3% |
+    | True Positive  |   513 |  7.3% |
+    | True Negative  | 6,412 | 91.6% |
+    | False Positive |     7 |  0.1% |
+    | False Negative |    68 |  1.0% |
+    | Precision      |       | 98.7% |
+    | Recall         |       | 88.3% |
+    | Accuracy       |       | 98.9% |
+    | F1-Score       |       | 93.2% |
+    +----------------+-------+-------+
+        
+    '''
+    # Calculate all parameters.
+    tn0, fp0, fn0, tp0 = confusion_matrix(y_true, y_pred).ravel()
+    tn1, fp1, fn1, tp1 = np.r_[tn0, fp0, fn0, tp0]/len(y_true)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+    N0, N1 = int(sum(y_true)), sum(y_true)/len(y_true)
+    decimal = max(int(decimal), 0)
+    fmt1, fmt2 = "{:,d}".format, ("{:." + f"{decimal}" + "%}").format
+    
+    # Set up summary table
+    t = PrettyTable(['Statistics', 'Value', "%"])
+    t.align["Statistics"] = "l"
+    t.align["Value"] = "r"
+    t.align["%"] = "r"
+    t.add_row(['N' , fmt1(len(y_true)), ""])
+    t.add_row(['Target' , fmt1(N0), fmt2(N1)])
+    t.add_row(['True Positive' , fmt1(tp0), fmt2(tp1)])
+    t.add_row(['True Negative' , fmt1(tn0), fmt2(tn1)])
+    t.add_row(['False Positive', fmt1(fp0), fmt2(fp1)])
+    t.add_row(['False Negative', fmt1(fn0), fmt2(fn1)])
+    t.add_row(["Precision", "", fmt2(tp0/np.fmax(fp0+tp0,1))])
+    t.add_row(["Recall"   , "", fmt2(tp0/np.fmax(fn0+tp0,1))])
+    t.add_row(["Accuracy" , "", fmt2((tp0+tn0)/len(y_true))])
+    t.add_row(["F1-Score" , "", fmt2(f1)])
+    print(t)
+
+def print_rule(rule, decimal=2):
+    
+    '''
+    Prints subrule(s).
+    
+    Parameters
+    ----------
+    rules : collections.namedtuple
+        A tuple subclass named "Rule" (typename).
+    
+    decimal : int, default=1
+        Decimal place for %.
+
+    Example
+    -------
+    >>> print_rule(rule, decimal=4)
+    
+    +------+-------------+------+--------+
+    | Item | Varibale    | Sign |  Value |
+    +------+-------------+------+--------+
+    |  1   | Variable_01 |  ==  |    xxx |
+    |  2   | Variable_02 |  >=  | 1.0000 |
+    |  3   | Variable_03 |  ==  |     xx |
+    +------+-------------+------+--------+
+    
+    '''
+    # Set up summary table
+    t = PrettyTable(["Item", 'Varibale', 'Sign', "Value"])
+    t.align["Item"] = "c"
+    t.align["Varibale"] = "l"
+    t.align["Sign"] = "c"
+    t.align["Value"] = "r"
+    decimal = max(int(decimal),0)
+    fmt = ("{:,." +  f"{decimal}" + "f}").format
+    for n,h in enumerate(rule.rule,1):
+        var, sign, value = h
+        if isinstance(value, (int,float)): value = fmt(value)
+        t.add_row([n, var, sign, value])
+    print("Operator: ",rule.operator)
+    print(t)
+
+def evaluate_rules(eval_set, rules, operator="or"):
+    
+    '''
+    Evaluate set of rules.
+    
+    Parameters
+    ----------  
+    eval_set : list of tuples
+        A list of tuples, where first item is X of shape (n_samples, 
+        n_features) and the seccond item is y of shape (n_samples,) 
+        e.g. [(X0, y0), (X1, y1)]. 
+        
+    rules : list of namedtuple
+        A list of tuple subclass named "Rule" (typename).
+        
+    operator : {"or", "and"}, default="or"
+        If "or", "or" operator is assigned as a relationship between 
+        antecedent and consequent rules (n_operands > 0). If "and", 
+        "and" operator is assigned (n_operands > 1).    
+        
+    Returns
+    -------
+    EvalResults : collections.namedtuple
+        A dictionary subclass that contains fields as follows:
+    
+        Field      Description
+        -----      -----------
+        sample     Numer of samples
+        target     Number of targets
+        tp         True positive
+        fp         False positive
+        fn         False negative
+        tn         True negative
+        recall     Recall scores
+        precision  Precision scores
+        f1         F1 scores
+        accuray    Accuracy
+        
+        Note: all outputs are arranged according to `eval_set`
+    
+    '''
+    if not isinstance(eval_set, list):
+        raise ValueError(f"`eval_set` has to be list. "
+                         f"Got {type(eval_set)} instead.")
+    
+    keys = ["sample","target","tp", "fp", "fn", "tn", 
+            "recall", "precision","f1", "accuracy"]
+    data = dict([(key,[]) for key in keys])
+
+    for X,y in eval_set:
+        
+        # Determine `y_pred` given rule(s).
+        alert = np.vstack([rule_alert(X, rule) for rule in rules]).T
+        if operator=="or": y_pred = (alert.sum(1)>0).astype(int)
+        else: y_pred = (alert.sum(1)==len(rules)).astype(int)
+        y_true = np.array(y).astype(int)
+    
+        # Calculate all metrics.
+        tp, fp, fn, tn, recall, precision, f1 = cfm_base(y_true, y_pred)
+        n_samples, n_targets = len(y_true), sum(y_true)
+        accuracy = (tp+tn)/len(y_true)
+        
+        data["sample"] += [n_samples]
+        data["target"] += [n_targets]
+        data["tp"] += [tp]
+        data["fp"] += [fp]
+        data["fn"] += [fn]
+        data["tn"] += [tn]
+        data["precision"] += [precision]
+        data["recall"] += [recall]
+        data["f1"] += [f1]
+        data["accuracy"] += [accuracy]
+    return namedtuple("EvalResults", keys)(**data)
+
+def create_rule(subrules, operator="and"):
+    '''
+    Create a rule.
+    
+    Parameters
+    ----------
+    subrules : list of tuples
+        A list of subrules in the following format [("variable",
+        "sign","value")], e.g. [("var","<=",1000)].
+    
+    operator : {"or", "and"}, default="or"
+        If "or", "or" operator is assigned as a relationship between 
+        antecedent and consequent rules. If "and", "and" operator is 
+        assigned.
+        
+    Returns
+    -------
+    Rule : list of namedtuple
+        A list of tuple subclass named "Rule" (typename).
+        
+    '''
+    return namedtuple("Rule", ["rule","operator"])(subrules,operator)
