@@ -583,6 +583,7 @@ class AssoRuleMining:
         n_targets = sum(y)
         if isinstance(self.min_support, float):
             min_support = int(min(1, self.min_support)*n_targets)
+        else: min_support = self.min_support
         min_support = max(min(n_targets, min_support),0)
         
         # Select features (n_supports>=min_support).
@@ -594,7 +595,7 @@ class AssoRuleMining:
         n_features = len(features)
         batch_size = int(np.ceil(n_features/self.n_batches))
         sections = np.arange(0, n_features, batch_size)
-        batches  = [b for b in np.split(features,sections) if len(b) > 0]
+        batches  = [b for b in np.split(features, sections) if len(b) > 0]
         n_batches = len(batches)
         
         # Set partial functions.
@@ -603,6 +604,7 @@ class AssoRuleMining:
         
         # Run batch
         t = 'Calculating . . . Batch : ({:,d}/{:,d})'
+        w1.value = t.format(0, n_batches)
         for n,batch in enumerate(batches,1):
             results = asso_job([delayed(assorule)\
                                 (X, y, start_with=start_with+[var]) 
