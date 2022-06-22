@@ -156,7 +156,7 @@ def AssoRule_base(X, y, start_with=None, metric="entropy", operator="and",
     is_entropy = True if metric=="entropy" else False
     class_weights = get_classweights(class_weights, y, is_entropy)
         
-    while len(c_indices)<=max_features_:
+    while len(c_indices)<max_features_:
         
         # Remaining features (sorted automatically)
         r_indices = list(set(r_indices).difference(c_indices))
