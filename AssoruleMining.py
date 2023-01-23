@@ -25,6 +25,7 @@ from prettytable import PrettyTable
 import warnings
 from scipy.sparse import csc_matrix as csc, isspmatrix_csc
 import sklearn
+from sklearn import linear_model
 from sklearn.metrics import (confusion_matrix, 
                              f1_score, 
                              precision_score, 
@@ -261,6 +262,13 @@ def find_decision_path(Tree, feature_names=None, tree_id=0):
 
     # Reshape if squeezed into a single float
     values = np.array([values]) if len(values.shape) == 0 else values
+    
+    # Recalculate when class_weight is assigned
+    if Tree.class_weight is not None:
+        # Use regression to estimate weight for respective classes
+        reg = linear_model.LinearRegression(fit_intercept=False)
+        reg.fit(values, node_samples)
+        values = np.round(values*reg.coef_).astype(int)
 
     # Determine rule for each decision path
     rule = dict()
@@ -1722,11 +1730,7 @@ class AssoRuleMining:
             results = list()
             for var in batch:
                 if var not in self.start_with:
-#                     kwargs = {"start_with":self.start_with + [var]}
-                    
                     kwargs = {"start_with":s_indices + [var]}
-                    
-                    
                     results += [delayed(assorule)(*args, **kwargs)]
             results = asso_job(results)
 
