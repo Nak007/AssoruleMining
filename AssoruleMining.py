@@ -220,7 +220,7 @@ def find_decision_path(Tree, feature_names=None, tree_id=0):
         
         Note: all outputs are arranged according to node id (from root to 
               leaf node). Fields with ** are only available when sklearn 
-              base estimator is DecisionTreeRegressor.
+              base estimator is DecisionTreeClassifier.
         
     '''
     # Check base estimator
@@ -362,7 +362,7 @@ class GetDecisionPaths:
 
         Note: all outputs are arranged according to node id (from root to 
               leaf node). Fields with ** are only available when sklearn 
-              base estimator is DecisionTreeRegressor.
+              base estimator is DecisionTreeClassifier.
 
     info : dict of numpy (masked) ndarrays
         A dict with keys as column headers. It can be imported into a 
@@ -380,7 +380,7 @@ class GetDecisionPaths:
         impurity**  impurity resulted from selected measure
 
         Note: Fields with ** are only available when sklearn base 
-              estimator is DecisionTreeRegressor.
+              estimator is DecisionTreeClassifier.
                   
     '''
     classifiers = (DecisionTreeClassifier, 
@@ -463,7 +463,7 @@ class GetDecisionPaths:
             impurity**  impurity resulted from selected measure
             
             Note: Fields with ** are only available when sklearn base 
-                  estimator is DecisionTreeRegressor.
+                  estimator is DecisionTreeClassifier.
             
         '''
         # Only single response variable supported (binary)
@@ -537,7 +537,7 @@ class GetDecisionPaths:
             impurity**  impurity resulted from selected measure
             
             Note: Fields with ** are only available when sklearn base 
-                  estimator is DecisionTreeRegressor.
+                  estimator is DecisionTreeClassifier.
                   
         '''
         data = []
