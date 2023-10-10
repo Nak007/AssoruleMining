@@ -445,7 +445,7 @@ class GetDecisionPaths:
 
             Note: all outputs are arranged according to node id (from root to 
                   leaf node). Fields with ** are only available when sklearn 
-                  base estimator is DecisionTreeRegressor.
+                  base estimator is DecisionTreeClassifier.
         
         info : dict of numpy (masked) ndarrays
             A dict with keys as column headers. It can be imported into a 
@@ -787,7 +787,7 @@ class TreeRuleMining:
         self.cal_max_depth = cal_max_depth
         self.exclude = exclude
 
-    def fit(self, X, y):
+    def fit(self, X, y, sample_weight=None):
         
         '''
         Fit the model from the training set (X, y).
@@ -799,6 +799,10 @@ class TreeRuleMining:
 
         y : array-like of shape (n_samples,)
             The target values (class labels) as integers.
+    
+        sample_weight : array-like of shape (n_samples,), default=None
+            Array of weights that are assigned to individual samples. If 
+            not provided, then each sample is given unit weight.
        
         Attributes
         ----------
@@ -842,6 +846,10 @@ class TreeRuleMining:
         n_samples, n_targets = len(X), sum(y)
         use = np.ones(n_samples).astype(bool)
         
+        # Create `sample_weight`
+        if sample_weight is None: sample_weight = np.ones(n_samples)
+        else: sample_weight = np.array(sample_weight).flatten()
+        
         # widget inputs
         t1 = 'Calculating . . . Iteration : {:,d}/{:,d}'.format
         t2 = ', Number of remaining targets : {:,.0f} ({:.0%})'.format
@@ -861,7 +869,8 @@ class TreeRuleMining:
                 params.update({"max_depth": np.ceil(np.log2(sum(use)))})
             
             # Fit model with updated parameters
-            Tree = self.estimator.set_params(**params).fit(X[use], y[use])
+            Tree = self.estimator.set_params(**params)
+            Tree.fit(X[use], y[use], sample_weight[use])
             paths = GetDecisionPaths(**self.kwargs).fit(Tree, features)
             
             # Stop when there is no desicion path
@@ -930,7 +939,7 @@ class TreeRuleMining:
             
         return pd.DataFrame(X_rules)
     
-    def fit_transform(self, X, y, n_rules=None):
+    def fit_transform(self, X, y, n_rules=None, sample_weight=None):
         
         '''
         Fit the model from the training set (X, y) and apply rules on X.
@@ -946,6 +955,10 @@ class TreeRuleMining:
         n_rules : int, default=None
             Number of rules to be applied e.g. if n_rules=2 then "Rule_1",
             and "Rule_2" are applied. If None, all rules are applied.
+            
+        sample_weight : array-like of shape (n_samples,), default=None
+            Array of weights that are assigned to individual samples. If 
+            not provided, then each sample is given unit weight.
        
         Returns
         -------
@@ -953,7 +966,7 @@ class TreeRuleMining:
             The triggered rule(s) of the input samples.
                   
         '''
-        self.fit(X, y)
+        self.fit(X, y, sample_weight)
         return self.transform(X, n_rules)
     
     def evaluate(self, X, y, n_rules=None, cumulative=False):
